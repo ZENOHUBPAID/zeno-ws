@@ -52,7 +52,11 @@ const server = http.createServer((req, res) => {
     const hwid = u.searchParams.get('hwid') || '';
     let valid = false, plan = null, expires = null, status = 'Invalid', reason = 'invalid';
     if (k === SECRET) { valid = true; plan = 'master'; expires = 9999999999; status='Active'; reason='ok'; }
-    else if (KEYS && KEYS[k]) { const e = KEYS[k]; plan = e.plan; expires = e.expires; if (e.expires && e.expires < Math.floor(Date.now()/1000)) { valid=false; status='Expired'; reason='expired'; } else { valid=true; status='Active'; reason='ok'; if (!e.hwid && hwid) { e.hwid = hwid; try { fs.writeFileSync('keys.json', JSON.stringify(KEYS, null, 2)); } catch(e){} } } }
+    else if (KEYS && KEYS[k]) { const e = KEYS[k]; plan = e.plan;
+      // Si la key a une duree mais pas encore de expires, le timer commence AU PREMIER LOGIN
+      if (e.duration && !e.expires) { e.expires = Math.floor(Date.now()/1000) + e.duration; try { fs.writeFileSync('keys.json', JSON.stringify(KEYS, null, 2)); } catch(_){} console.log('[KEY] First login, timer start for', k, 'expires', e.expires); }
+      expires = e.expires;
+      if (e.expires && e.expires < Math.floor(Date.now()/1000)) { valid=false; status='Expired'; reason='expired'; } else { valid=true; status='Active'; reason='ok'; if (!e.hwid && hwid) { e.hwid = hwid; try { fs.writeFileSync('keys.json', JSON.stringify(KEYS, null, 2)); } catch(e){} } } }
     res.writeHead(200, {'Content-Type':'application/json'});
     res.end(JSON.stringify({valid, plan, expires, slot: '1/1', status, reason}));
     return;
@@ -142,4 +146,4 @@ server.listen(PORT, () => {
   console.log('[ZENO WS] Path: ' + PATH);
   console.log('[ZENO WS] WS URL: ws://localhost:' + PORT + PATH);
 });
-    
+        
