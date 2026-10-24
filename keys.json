@@ -1,3 +1,4 @@
 {
   "ZENO-TEST-1234": { "hwid": null, "expires": 9999999999, "plan": "lifetime", "discordId": "test" }
+  "ZENO-WJFC5G1N": { "hwid": null, "expires": 9999999999, "plan": "lifetime", "discordId": "ton_client" }
 }
