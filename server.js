@@ -50,11 +50,11 @@ const server = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://' + req.headers.host);
     const k = u.searchParams.get('key');
     const hwid = u.searchParams.get('hwid') || '';
-    let valid = false, plan = null, expires = null;
-    if (k === SECRET) { valid = true; plan = 'master'; expires = 9999999999; }
-    else if (KEYS && KEYS[k]) { const e = KEYS[k]; if (!e.expires || e.expires > Math.floor(Date.now()/1000)) { valid = true; plan = e.plan; expires = e.expires; if (!e.hwid && hwid) { e.hwid = hwid; try { fs.writeFileSync('keys.json', JSON.stringify(KEYS, null, 2)); } catch(e){} } } }
+    let valid = false, plan = null, expires = null, status = 'Invalid', reason = 'invalid';
+    if (k === SECRET) { valid = true; plan = 'master'; expires = 9999999999; status='Active'; reason='ok'; }
+    else if (KEYS && KEYS[k]) { const e = KEYS[k]; plan = e.plan; expires = e.expires; if (e.expires && e.expires < Math.floor(Date.now()/1000)) { valid=false; status='Expired'; reason='expired'; } else { valid=true; status='Active'; reason='ok'; if (!e.hwid && hwid) { e.hwid = hwid; try { fs.writeFileSync('keys.json', JSON.stringify(KEYS, null, 2)); } catch(e){} } } }
     res.writeHead(200, {'Content-Type':'application/json'});
-    res.end(JSON.stringify({valid, plan, expires, slot: '1/1', status: valid ? 'Active' : 'Invalid'}));
+    res.end(JSON.stringify({valid, plan, expires, slot: '1/1', status, reason}));
     return;
   }
   if (req.url.endsWith('/time')) {
@@ -142,3 +142,4 @@ server.listen(PORT, () => {
   console.log('[ZENO WS] Path: ' + PATH);
   console.log('[ZENO WS] WS URL: ws://localhost:' + PORT + PATH);
 });
+    
