@@ -1,4 +1,26 @@
 {
-  "ZENO-TEST-1234": { "hwid": null, "expires": 9999999999, "plan": "lifetime", "discordId": "test" }
-  "ZENO-WJFC5G1N": { "hwid": null, "expires": 9999999999, "plan": "lifetime", "discordId": "ton_client" }
+  "ZENO-TEST-1234": {
+    "hwid": null,
+    "expires": 9999999999,
+    "plan": "lifetime",
+    "discordId": "test"
+  },
+  "ZENO-1WEEK-ABCD": {
+    "hwid": null,
+    "expires": 1790000000,
+    "plan": "weekly",
+    "discordId": ""
+  },
+  "ZENO-WJFC5G1N": {
+    "hwid": null,
+    "expires": 9999999999,
+    "plan": "lifetime",
+    "discordId": "ton_client"
+  },
+  "ZENO-K4M3IA2X": {
+    "hwid": null,
+    "expires": 1793445450,
+    "plan": "weekly",
+    "discordId": "client_weekly"
+  }
 }
