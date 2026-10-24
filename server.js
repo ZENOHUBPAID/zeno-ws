@@ -5,6 +5,9 @@ const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 10000;
 const SECRET = process.env.WS_SECRET || "ZENO_SECURE_9xK2mP7q";
+const fs = require("fs");
+let KEYS={};
+try{KEYS=JSON.parse(fs.readFileSync("keys.json","utf8"));}catch(e){}
 const PATH = "/joiner_zeno/ws";
 
 let jobs = new Map();
@@ -41,6 +44,17 @@ const server = http.createServer((req, res) => {
   if (req.url === '/health' || req.url === '/status') {
     res.writeHead(200, {'Content-Type': 'application/json'});
     res.end(JSON.stringify({ ok: true, status: 'healthy', clients: clients.size, jobs: jobs.size, uptime: process.uptime() }));
+    return;
+  }
+  if (req.url.startsWith('/validate')) {
+    const u = new URL(req.url, 'http://' + req.headers.host);
+    const k = u.searchParams.get('key');
+    const hwid = u.searchParams.get('hwid') || '';
+    let valid = false, plan = null, expires = null;
+    if (k === SECRET) { valid = true; plan = 'master'; expires = 9999999999; }
+    else if (KEYS && KEYS[k]) { const e = KEYS[k]; if (!e.expires || e.expires > Math.floor(Date.now()/1000)) { valid = true; plan = e.plan; expires = e.expires; if (!e.hwid && hwid) { e.hwid = hwid; try { fs.writeFileSync('keys.json', JSON.stringify(KEYS, null, 2)); } catch(e){} } } }
+    res.writeHead(200, {'Content-Type':'application/json'});
+    res.end(JSON.stringify({valid, plan, expires, slot: '1/1', status: valid ? 'Active' : 'Invalid'}));
     return;
   }
   if (req.url.endsWith('/time')) {
