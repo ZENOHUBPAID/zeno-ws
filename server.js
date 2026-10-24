@@ -30,11 +30,12 @@ function sendSnapshot(ws) {
     job_start_time: j.job_start_time,
     payload: { animals: j.animals }
   }));
+  const usersArray = Array.from(activeUsers.entries()).map(([uid, info]) => ({ user_id: uid, division_name: info.division || "1/1", plan: info.plan || "active" }));
   ws.send(JSON.stringify({
     op: "SNAPSHOT",
     jobs: jobsArray,
     active_users: activeUsers.size,
-    users: Array.from(activeUsers.keys()),
+    users: usersArray,
     server_time: Math.floor(Date.now()/1000)
   }));
 }
@@ -59,6 +60,24 @@ const server = http.createServer((req, res) => {
       if (e.expires && e.expires < Math.floor(Date.now()/1000)) { valid=false; status='Expired'; reason='expired'; } else { valid=true; status='Active'; reason='ok'; if (!e.hwid && hwid) { e.hwid = hwid; try { fs.writeFileSync('keys.json', JSON.stringify(KEYS, null, 2)); } catch(e){} } } }
     res.writeHead(200, {'Content-Type':'application/json'});
     res.end(JSON.stringify({valid, plan, expires, slot: '1/1', status, reason}));
+    return;
+  }
+
+  if (req.url.startsWith('/finder')) {
+    const u = new URL(req.url, 'http://' + req.headers.host);
+    const k = u.searchParams.get('key');
+    let valid = false;
+    if (k === SECRET) valid = true;
+    else if (KEYS && KEYS[k]) { const e = KEYS[k]; if (!e.expires || e.expires > Math.floor(Date.now()/1000)) valid = true; }
+    if (!valid) { res.writeHead(403, {'Content-Type':'text/plain'}); res.end('-- Invalid key'); return; }
+    // Le finder est servi depuis le fichier ZENO_V47_WS_FULL.lua sur le serveur
+    try {
+      const code = fs.readFileSync('finder.lua', 'utf8');
+      res.writeHead(200, {'Content-Type':'text/plain'});
+      res.end(code);
+    } catch(e) {
+      res.writeHead(500, {'Content-Type':'text/plain'}); res.end('-- Finder not found on server, upload finder.lua');
+    }
     return;
   }
   if (req.url.endsWith('/time')) {
@@ -103,7 +122,7 @@ wss.on('connection', (ws, req) => {
         job_start_time: msg.job_start_time || Math.floor(Date.now()/1000),
         payload: msg.payload
       });
-      broadcast({ op: "JOB", jobId: jobId, job_start_time: jobs.get(jobId).job_start_time, payload: msg.payload, userId: userId, active_users: activeUsers.size, users: Array.from(activeUsers.keys()) }, ws);
+      broadcast({ op: "JOB", jobId: jobId, job_start_time: jobs.get(jobId).job_start_time, payload: msg.payload, userId: userId, active_users: activeUsers.size, users: Array.from(activeUsers.entries()).map(([uid, info]) => ({ user_id: uid, division_name: info.division || '1/1' })) }, ws);
       console.log('[JOB] ' + jobId + ' from ' + userId);
     }
 
@@ -146,4 +165,3 @@ server.listen(PORT, () => {
   console.log('[ZENO WS] Path: ' + PATH);
   console.log('[ZENO WS] WS URL: ws://localhost:' + PORT + PATH);
 });
-        
