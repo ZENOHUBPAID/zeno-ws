@@ -22,5 +22,25 @@
     "expires": 1793445450,
     "plan": "weekly",
     "discordId": "client_weekly"
+  },
+  "ZENO-SUNGZN17": {
+    "hwid": null,
+    "expires": null,
+    "duration": 604800,
+    "plan": "weekly",
+    "discordId": "stock_weekly_1"
+  },
+  "ZENO-1OE04UN2": {
+    "hwid": null,
+    "expires": null,
+    "duration": 2592000,
+    "plan": "monthly",
+    "discordId": "stock_monthly_1"
+  },
+  "ZENO-QTKIZ9K5": {
+    "hwid": null,
+    "expires": 9999999999,
+    "plan": "lifetime",
+    "discordId": "stock_lifetime_1"
   }
 }
