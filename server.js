@@ -13,6 +13,30 @@ const PATH = "/joiner_zeno/ws";
 let jobs = new Map();
 let clients = new Set();
 let activeUsers = new Map();
+let bestToday = { name: null, value: 0, jobId: null, ts: 0 };
+let seenPets = new Map(); // dedupe : key = name|gen|jobId -> ts, evite d'envoyer 10x le meme pet
+
+function getPriority(animal) {
+  // Secret et OG en priorite, pas Brainrot God
+  const rarity = (animal.Rarity || animal.rarity || "").toLowerCase();
+  const name = (animal.DisplayName || animal.name || "").toLowerCase();
+  if (rarity.includes("og") || name.includes(" og") || rarity === "og") return 100;
+  if (rarity.includes("secret") || name.includes("secret")) return 95;
+  // 100M+ aussi prioritaire
+  const val = parseFloat((animal.Generation || "").toString().replace(/[^0-9.]/g,"")) || 0;
+  const mult = (animal.Generation || "").toString().includes("M") ? 1e6 : (animal.Generation || "").toString().includes("B") ? 1e9 : 1;
+  const total = val * mult;
+  if (total >= 100e6) return 90;
+  if (total >= 10e6) return 80;
+  return 0;
+}
+
+function getMutationStr(animal) {
+  // Mutation dans les logs et webhook : Rainbow, Gold, Diamond, Galaxy, etc.
+  const mut = animal.Mutation || animal.mutation || animal.Mutations || "";
+  if (Array.isArray(mut)) return mut.join(", ");
+  return mut.toString();
+}
 
 function broadcast(obj, except = null) {
   const data = JSON.stringify(obj);
@@ -32,7 +56,7 @@ function sendSnapshot(ws) {
   }));
   const usersArray = Array.from(activeUsers.entries()).map(([uid, info]) => ({ user_id: uid, division_name: info.division || "1/1", plan: info.plan || "active" }));
   ws.send(JSON.stringify({
-    op: "SNAPSHOT",
+    op: "SNAPSHOT", bestToday,
     jobs: jobsArray,
     active_users: activeUsers.size,
     users: usersArray,
@@ -44,7 +68,7 @@ const server = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   if (req.url === '/health' || req.url === '/status') {
     res.writeHead(200, {'Content-Type': 'application/json'});
-    res.end(JSON.stringify({ ok: true, status: 'healthy', clients: clients.size, jobs: jobs.size, uptime: process.uptime() }));
+    res.end(JSON.stringify({ ok: true, status: 'healthy', clients: clients.size, jobs: jobs.size, uptime: process.uptime(), bestToday }));
     return;
   }
   if (req.url.startsWith('/validate')) {
@@ -130,8 +154,27 @@ wss.on('connection', (ws, req) => {
     if (msg.op === "JOB") {
       const jobId = msg.jobId || (msg.payload && msg.payload.jobId);
       if (!jobId) return;
+      const animals = (msg.payload && msg.payload.animals) || msg.animals || [];
+      // Dedupe : si meme pet deja vu il y a moins de 30s, on skip
+      for (const a of animals) {
+        const key = (a.DisplayName || a.name || "") + "|" + (a.Generation || "") + "|" + jobId;
+        if (seenPets.has(key) && Date.now() - seenPets.get(key) < 30000) continue;
+        seenPets.set(key, Date.now());
+        // Best today
+        const val = parseFloat((a.Generation || "").toString().replace(/[^0-9.]/g,"")) || 0;
+        const mult = (a.Generation || "").toString().includes("B") ? 1e9 : (a.Generation || "").toString().includes("M") ? 1e6 : 1;
+        const total = val * mult;
+        if (total > bestToday.value) bestToday = { name: a.DisplayName || a.name, value: total, jobId, ts: Date.now() };
+        // Ajoute mutation et priorite pour les logs et webhook
+        a.mutation_str = getMutationStr(a);
+        a.priority = getPriority(a);
+        a.is_og = getPriority(a) >= 100;
+        a.is_secret = getPriority(a) >= 95 && getPriority(a) < 100;
+      }
+      // Trie par priorite : Secret et OG d'abord
+      animals.sort((x,y) => (y.priority||0) - (x.priority||0));
       jobs.set(jobId, {
-        animals: (msg.payload && msg.payload.animals) || msg.animals || [],
+        animals: animals,
         job_start_time: msg.job_start_time || Math.floor(Date.now()/1000),
         payload: msg.payload
       });
@@ -166,7 +209,7 @@ wss.on('connection', (ws, req) => {
 setInterval(() => {
   const now = Math.floor(Date.now()/1000);
   for (const [jobId, j] of jobs) {
-    if (now - j.job_start_time > 600) {
+    if (now - j.job_start_time > 300) { // 5 min au lieu de 60s, on garde plus longtemps
       jobs.delete(jobId);
       broadcast({ op: "DELETE", job_id: jobId });
     }
