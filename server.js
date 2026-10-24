@@ -96,22 +96,35 @@ wss.on('connection', (ws, req) => {
   const userId = url.searchParams.get('userId') || 'unknown';
   const key = url.searchParams.get('key') || '';
 
-  if (SECRET && key !== SECRET && key !== 'public-test') {
+  // Accepte SECRET + toutes les cles ZENO valides de keys.json (pas que SECRET, sinon KaWaifu reste Offline)
+  const isZenoKey = KEYS && KEYS[key];
+  // Sans LuaProtect, script_key est vide -> on autorise aussi vide / public-test pour le test
+  if (SECRET && key !== SECRET && key !== 'public-test' && key !== '' && !isZenoKey) {
     ws.send(JSON.stringify({ op: "KICK", reason: "[ZENO WS] Key invalide" }));
     ws.close();
-    console.log('[REJECT] userId=' + userId);
+    console.log('[REJECT] userId=' + userId + ' key=' + key);
     return;
   }
 
   console.log('[CONNECT] ' + userId + ' total=' + (clients.size+1));
   clients.add(ws);
   activeUsers.set(userId, { userId, lastSeen: Date.now() });
+  // KaWaifu attend INIT pour passer en Live - on envoie INIT + SNAPSHOT + STATUS
+  const jobsArrayInit = Array.from(jobs.entries()).map(([jobId, j]) => ({ jobId, _enc: null, jid: jobId, animals: j.animals, job_start_time: j.job_start_time, payload: { animals: j.animals } }));
+  ws.send(JSON.stringify({ op: "INIT", data: { server_time: Math.floor(Date.now()/1000), jobs: jobsArrayInit, active_users: activeUsers.size } }));
   sendSnapshot(ws);
   ws.send(JSON.stringify({ op: "STATUS", server_time: Math.floor(Date.now()/1000), active_users: activeUsers.size }));
 
   ws.on('message', (raw) => {
+    const rawStr = raw.toString();
+    if (rawStr === "READY") {
+      // KaWaifu envoie READY en string apres connexion, on repond INIT pour passer en Live
+      const jobsArrayInit = Array.from(jobs.entries()).map(([jobId, j]) => ({ jobId, _enc: null, jid: jobId, animals: j.animals, job_start_time: j.job_start_time, payload: { animals: j.animals } }));
+      try { ws.send(JSON.stringify({ op: "INIT", data: { server_time: Math.floor(Date.now()/1000), jobs: jobsArrayInit, active_users: activeUsers.size } })); } catch(e) {}
+      return;
+    }
     let msg;
-    try { msg = JSON.parse(raw.toString()); } catch(e) { return; }
+    try { msg = JSON.parse(rawStr); } catch(e) { return; }
     activeUsers.set(userId, { userId, lastSeen: Date.now() });
 
     if (msg.op === "JOB") {
