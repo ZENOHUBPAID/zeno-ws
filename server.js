@@ -23,7 +23,7 @@ try { KEYS = JSON.parse(fs.readFileSync("keys.json", "utf8")); } catch(e) {}
 let jobs = new Map(); // jobId -> { animals, job_start_time, region, priority, payload }
 let clients = new Set(); // ws
 let activeUsers = new Map(); // userId -> { lastSeen, region, filter, sessionId }
-let bestToday = { name: null, value: 0, jobId: null, ts: 0, mutation: null };
+// Best Today SUPPRIME dans V12
 let seenPets = new Map(); // name|gen|jobId -> ts
 let seenGlobal = new Map(); // name|gen -> ts pour dedupe global 10s
 let sessions = new Map(); // sessionId -> { userId, missedJobs: [], lastSeen }
@@ -286,7 +286,7 @@ wss.on('connection', (ws, req) => {
         if (!matchesFilter(a, globalFilter)) continue;
         const total = parseValue(a.Generation || "");
         stats.totalPets++;
-        if (total > bestToday.value) {
+        if (false) {
           bestToday = { name: a.DisplayName || a.name, value: total, jobId, ts: Date.now(), mutation: getMutationStr(a), region: regionJob };
           // Best Today -> webhook best today
           sendWebhook(BEST_TODAY_WEBHOOK, "BEST TODAY - " + bestToday.name, bestToday.name + " - " + (a.Generation || "") + " - Mutation: " + bestToday.mutation + " - Job: " + jobId, 16776960, "");
@@ -368,4 +368,4 @@ server.listen(PORT, () => {
   console.log('[ZENO WS V3] Rapide + Reconnexion Auto + Ping/Pong + Filtre Intelligent');
   console.log('[ZENO WS V3] OG -> @everyone @here, Best Today -> webhook');
 });
-                      
+    
