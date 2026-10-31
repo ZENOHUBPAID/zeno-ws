@@ -282,7 +282,7 @@ async function botScanLoop() {
   for (let i = 1; i <= BOT_COUNT; i++) {
     bots.set(`BOT_${i}`, { lastScan: Date.now(), status: "scanning", jobId: null });
   }
-}
+    }
 
 // On lance le bot scanner toutes les 30s
 setInterval(botScanLoop, BOT_SCAN_INTERVAL);
@@ -390,4 +390,113 @@ wss.on('connection', (ws, req) => {
     try { msg = JSON.parse(rawStr); } catch(e) { return; }
     activeUsers.set(userId, { userId, lastSeen: Date.now(), region, filter: ws._filter, sessionId, isBot });
     const now = Date.now();
-    if (now - ws._rate.reset > 10000) { ws._rate.count = 0; ws._rat
+    if (now - ws._rate.reset > 10000) { ws._rate.count = 0; ws._rate.reset = now; }
+    ws._rate.count++;
+    if (ws._rate.count > 100) return;
+    if (msg.op === "PING" || msg.op === "PONG") {
+      ws.isAlive = true; ws._lastPing = Date.now(); stats.pings++;
+      ws.send(JSON.stringify({ op: "PONG", server_time: Math.floor(Date.now()/1000), ping: msg.ts || Date.now() }));
+      return;
+    }
+    if (msg.op === "SET_FILTER") {
+      const f = msg.filter || msg.payload || {};
+      if (f.min !== undefined) ws._filter.min = f.min;
+      if (f.mutation) ws._filter.mutation = f.mutation;
+      if (f.region) { ws._filter.region = f.region; ws._region = f.region; }
+      ws.send(JSON.stringify({ op: "FILTER_OK", filter: ws._filter }));
+      sendSnapshot(ws);
+      return;
+    }
+    if (msg.op === "JOB") {
+      const jobId = msg.jobId || (msg.payload && msg.payload.jobId);
+      if (!jobId) return;
+      stats.jobsReceived++;
+      const animals = (msg.payload && msg.payload.animals) || msg.animals || [];
+      const regionJob = msg.region || (msg.payload && msg.payload.region) || region;
+      let filteredAnimals = [];
+      for (const a of animals) {
+        const keyPet = (a.DisplayName || a.name || "") + "|" + (a.Generation || "") + "|" + jobId;
+        const keyGlobal = (a.DisplayName || a.name || "") + "|" + (a.Generation || "");
+        if (seenPets.has(keyPet) && Date.now() - seenPets.get(keyPet) < 30000) continue;
+        if (seenGlobal.has(keyGlobal) && Date.now() - seenGlobal.get(keyGlobal) < 10000) continue;
+        seenPets.set(keyPet, Date.now());
+        seenGlobal.set(keyGlobal, Date.now());
+        if (!matchesFilter(a, globalFilter)) continue;
+        const total = parseValue(a.Generation || "");
+        stats.totalPets++;
+        const isOG = getPriority(a) >= 95 && getPriority(a) < 100;
+        const isSecret = getPriority(a) >= 100;
+        if (isOG) { stats.ogCount++; sendWebhook(OG_WEBHOOK, "OG LOGGED - " + (a.DisplayName || a.name), (a.DisplayName || a.name) + " - " + (a.Generation || "") + " - Mutation: " + getMutationStr(a) + " - Job: " + jobId, 16711680, "@everyone @here"); }
+        if (isSecret) stats.secretCount++;
+        a.mutation_str = getMutationStr(a);
+        a.priority = getPriority(a);
+        a.is_og = isOG;
+        a.is_secret = isSecret;
+        a.region = regionJob;
+        filteredAnimals.push(a);
+      }
+      if (filteredAnimals.length === 0) return;
+      filteredAnimals.sort((x,y) => (y.priority||0) - (x.priority||0));
+      const priority = Math.max(...filteredAnimals.map(a => a.priority || 0));
+      jobs.set(jobId, { animals: filteredAnimals, job_start_time: msg.job_start_time || Math.floor(Date.now()/1000), region: regionJob, priority, payload: { animals: filteredAnimals } });
+      const out = { op: "JOB", jobId, job_start_time: jobs.get(jobId).job_start_time, region: regionJob, priority, payload: { animals: filteredAnimals }, userId, active_users: activeUsers.size };
+      for (const [sid, sess] of sessions) { if (sess.missedJobs.length < 50) sess.missedJobs.push(out); }
+      stats.jobsBroadcast++;
+      // NOUVEAU V4 : On envoie aussi dans Discord avec le design Dragon
+      sendDiscordLog(filteredAnimals, jobId, null);
+      if (priority >= 90) broadcastFast(out, ws); else broadcastBatch(out, ws);
+      console.log('[JOB V4] ' + jobId + ' prio=' + priority + ' from ' + userId + (isBot ? ' [BOT]' : '') + ' animals=' + filteredAnimals.length);
+    }
+    if (msg.op === "STEAL") { broadcastFast({ op: "STEAL", payload: msg.payload, sig: msg.sig, ts: msg.ts }, ws); }
+    if (msg.op === "DELETE" && msg.jobId) { jobs.delete(msg.jobId); broadcast({ op: "DELETE", job_id: msg.jobId }, ws); }
+    if (msg.op === "HEARTBEAT") { ws.isAlive = true; ws._lastPing = Date.now(); ws.send(JSON.stringify({ op: "HEARTBEAT_ACK", server_time: Math.floor(Date.now()/1000) })); }
+    if (msg.op === "BOT_SCAN_RESULT") {
+      // Un bot qui a scanne un serveur et qui renvoie ce qu'il a trouve
+      console.log('[BOT RESULT] from ' + userId + ' job=' + msg.jobId + ' animals=' + (msg.animals || []).length);
+      // On traite comme un JOB normal
+      msg.op = "JOB";
+      // On re-emet comme JOB
+      ws.emit('message', JSON.stringify(msg));
+    }
+  });
+  ws.on('close', () => {
+    clients.delete(ws);
+    setTimeout(() => {
+      const u = activeUsers.get(userId);
+      if (u && Date.now() - u.lastSeen > 60000) activeUsers.delete(userId);
+    }, 60000);
+    console.log('[DISCONNECT V4] ' + userId + ' keep 60s');
+  });
+  ws.on('error', () => { try { ws.terminate(); } catch(e) {} });
+});
+
+setInterval(() => {
+  const now = Date.now();
+  for (const ws of clients) {
+    if (!ws.isAlive || now - ws._lastPing > 30000) {
+      try { ws.terminate(); } catch(e) {}
+      clients.delete(ws);
+      continue;
+    }
+    ws.isAlive = false;
+    try { ws.ping(); ws.send(JSON.stringify({ op: "PING", server_time: Math.floor(Date.now()/1000), ts: now })); } catch(e) {}
+  }
+  const nowSec = Math.floor(now/1000);
+  for (const [jobId, j] of jobs) {
+    const age = nowSec - j.job_start_time;
+    const maxAge = (j.priority || 0) >= 90 ? 600 : 300;
+    if (age > maxAge) { jobs.delete(jobId); broadcast({ op: "DELETE", job_id: jobId }); }
+  }
+  for (const [sid, sess] of sessions) { if (now - sess.lastSeen > 600000) sessions.delete(sid); }
+  for (const [k, ts] of seenPets) { if (now - ts > 60000) seenPets.delete(k); }
+  for (const [k, ts] of seenGlobal) { if (now - ts > 20000) seenGlobal.delete(k); }
+}, 15000);
+
+server.listen(PORT, () => {
+  console.log('[ZENO WS V4 - TYPE 2 BOTS] Listening on port ' + PORT);
+  console.log('[ZENO WS V4] Path: ' + PATH);
+  console.log('[ZENO WS V4] Bots: ' + BOT_COUNT + ' - Ils scannent meme quand personne utilise AJ');
+  console.log('[ZENO WS V4] Webhooks: Baiters / Midlight / Highlight / Peaklight');
+  console.log('[ZENO WS V4] Bot: ZENO NOTIFIER - Avatar logo 101728419925095');
+});
+        
