@@ -1,24 +1,11 @@
-// ZENO WS Server V4 - TYPE 2 - AVEC BOTS QUI SCANNENT TOUT SEULS
-// Avant c'etait TYPE 1 : relais, si personne utilise AJ = 0 log
-// Maintenant TYPE 2 : bots qui scannent meme quand personne utilise AJ
-// Deploie sur Render / Railway en 2 min, gratuit
-// 
-// COMMENT CA MARCHE :
-// - Le serveur il a maintenant des BOTS internes (BOT_COUNT = 5)
-// - Chaque bot = un faux client websocket qui reste connecte 24h/24
-// - Toutes les 30s, le serveur il va chercher la liste des serveurs publics Roblox
-//   pour Steal a Brainrot (PlaceId 109983668079237) via l'API Roblox
-// - Il cree des JOBS pour ces serveurs et il les envoie aux bots
-// - Les bots ils rejoignent les serveurs (via tes comptes Roblox que tu mets en BOT_ACCOUNTS)
-// - Quand un bot trouve un brainrot, il envoie un JOB au serveur
-// - Le serveur il envoie dans les 4 webhooks Discord + il broadcast a tout le monde
-//
-// POUR AVOIR VRAIMENT DES LOGS MEME SEUL :
-// Tu dois mettre au moins 1 compte Roblox en BOT_ACCOUNTS qui tourne avec AJ
-// Sur mobile, tu peux laisser 1 tel allume avec AJ qui tourne en bot
-// Sur PC, tu peux lancer plusieurs comptes en meme temps = plus de logs
-// Si tu mets 0 bot, le serveur il peut juste lister les serveurs mais il peut pas voir les brainrots dedans
-// car il faut etre DANS le jeu pour voir les brainrots
+// ZENO WS Server V4 FINAL - Dernier serveur JS
+// - Rapide: OG/Secret 0ms, petits pets batch 50ms
+// - Reconnexion auto: SessionId, MissedJobs 50, garde 60s
+// - Ping/Pong: 15s ping, 30s timeout
+// - Intelligent: filtre par client (min, mutation, region), priorite Secret>OG>100M, dedupe 30s + 10s global
+// - OG -> @everyone @here dans webhook oglights
+// - Best Today SUPPRIME comme tu as demande
+// - Teleport verifie pour pas kick "This teleport couldn't be verified"
 
 const http = require('http');
 const WebSocket = require('ws');
@@ -28,53 +15,40 @@ const PORT = process.env.PORT || 10000;
 const SECRET = process.env.WS_SECRET || "ZENO_SECURE_9xK2mP7q";
 const PATH = "/joiner_zeno/ws";
 
-// === TES 4 WEBHOOKS DISCORD - NOUVEAU SERVEUR ===
-const WEBHOOK_BAITERS = "https://discord.com/api/webhooks/1565370773303074996/HG5vFuoA75vWZesV1BIJVxFmlRSAqyOLtkryT290aulrrbVYhZLPFjxA85HVuqafn1e9";
-const WEBHOOK_MIDLIGHT = "https://discord.com/api/webhooks/1565370984079560785/qvNaSFOkkZzoRPML036B4nVEEShWg3LkfuR7vQplupzNpa7DSLjNqw6mBfdo0isqgYAg";
-const WEBHOOK_HIGHLIGHT = "https://discord.com/api/webhooks/1565371076504977601/76fxdPGRO9yOm4OGRtDycymEqoIJR5BzU6-l9EFsBrQusyZqOnBdMmm20gBK5npB8zaU";
-const WEBHOOK_PEAKLIGHT = "https://discord.com/api/webhooks/1565371190317686826/8FmJW-naAhRLAoJ_SU-iPCDjgXVNQ8X5vGAA9eF3Q4bftlBsL3daeATzxD2rMei-Ra2m";
-const BEST_TODAY_WEBHOOK = WEBHOOK_PEAKLIGHT;
-const OG_WEBHOOK = WEBHOOK_PEAKLIGHT;
-
-// === CONFIG BOTS ===
-const BOT_COUNT = parseInt(process.env.BOT_COUNT || "5"); // Nombre de bots qui scannent
-const PLACE_ID = "109983668079237"; // Steal a Brainrot
-const BOT_SCAN_INTERVAL = 30000; // Toutes les 30s on cherche des nouveaux serveurs
-const BOT_AVATAR = "https://thumbnails.roblox.com/v1/assets?assetIds=101728419925095&size=150x150&format=Png"; // Logo 101728419925095
+// METS TES 2 WEBHOOKS DISCORD ZENO AJ ICI
+const OG_WEBHOOK = process.env.OG_WEBHOOK || "https://discord.com/api/webhooks/1564736307463327817/UjSVEz4BzG2qRD0p0Lh5THagKKj72oVDaYQ9WJfAChhLyoSli0bz9VhiYe6tJXNjpy9k";
+// Best Today supprime, mais on garde la variable pour pas crasher si ancien code l'appelle
+const BEST_TODAY_WEBHOOK = null;
 
 let KEYS = {};
 try { KEYS = JSON.parse(fs.readFileSync("keys.json", "utf8")); } catch(e) {}
 
-// === ETAT (comme V3) ===
 let jobs = new Map();
 let clients = new Set();
 let activeUsers = new Map();
-let bestToday = null;
 let seenPets = new Map();
 let seenGlobal = new Map();
 let sessions = new Map();
-let stats = { jobsReceived: 0, jobsBroadcast: 0, ogCount: 0, secretCount: 0, totalPets: 0, startTime: Date.now(), pings: 0, botScans: 0, botJobs: 0 };
-let bots = new Map(); // botId -> { lastScan, jobId, status }
+let stats = { jobsReceived: 0, jobsBroadcast: 0, ogCount: 0, secretCount: 0, totalPets: 0, startTime: Date.now(), pings: 0 };
 let globalFilter = { min: 1000000, mutation: "ALL", region: "ALL" };
 
-// === HELPERS (comme V3) ===
 function parseValue(genStr) {
   const s = (genStr || "").toString();
   const val = parseFloat(s.replace(/[^0-9.]/g,"")) || 0;
   const mult = s.includes("B") ? 1e9 : s.includes("M") ? 1e6 : s.includes("K") ? 1e3 : 1;
   return val * mult;
 }
-function getMutationStr(animal) {
-  const m = animal.Mutation || animal.mutation || animal.Mutations || "";
+function getMutationStr(a) {
+  const m = a.Mutation || a.mutation || a.Mutations || "";
   if (Array.isArray(m)) return m.join(", ");
   return m.toString();
 }
-function getPriority(animal) {
-  const rarity = (animal.Rarity || animal.rarity || "").toLowerCase();
-  const name = (animal.DisplayName || animal.name || "").toLowerCase();
+function getPriority(a) {
+  const rarity = (a.Rarity || a.rarity || "").toLowerCase();
+  const name = (a.DisplayName || a.name || "").toLowerCase();
   if (rarity.includes("secret") || name.includes("secret")) return 100;
   if (rarity.includes("og") || name.includes(" og") || rarity === "og") return 95;
-  const total = parseValue(animal.Generation || animal.gen || "");
+  const total = parseValue(a.Generation || a.gen || "");
   if (total >= 100e6) return 90;
   if (total >= 10e6) return 80;
   if (total >= 1e6) return 70;
@@ -95,107 +69,11 @@ function matchesFilter(animal, filter) {
   }
   return true;
 }
-function getWebhookForValue(numValue) {
-  const v = Number(numValue) || parseFloat(numValue) || 0;
-  if (v >= 1000e6) return { url: WEBHOOK_PEAKLIGHT, tier: "Peaklights", color: 16776960 };
-  if (v >= 100e6) return { url: WEBHOOK_HIGHLIGHT, tier: "Highlight", color: 16776960 };
-  if (v >= 20e6) return { url: WEBHOOK_MIDLIGHT, tier: "Midlight", color: 16776960 };
-  if (v >= 5e6) return { url: WEBHOOK_BAITERS, tier: "Baiters", color: 16776960 };
-  return null;
-}
-
-// === WEBHOOK DISCORD - MEME DESIGN QUE DRAGON CANNELLONI ===
-function sendDiscordLog(brainrotsList, jobId, tierInfo) {
-  if (!brainrotsList || brainrotsList.length === 0) {
-    console.log("[WEBHOOK] No brainrotsList");
-    return;
-  }
-  const best = brainrotsList[0];
-  const val = parseValue(best.Generation || best.gen || "");
-  console.log("[WEBHOOK] Trying to send", best.DisplayName || best.name, "value:", val, "gen:", best.Generation || best.gen);
-  const webhook = getWebhookForValue(val);
-  if (!webhook) {
-    console.log("[WEBHOOK] No webhook for value", val, "- sending to baiters as fallback");
-    // Fallback to baiters for test
-    const fallback = { url: WEBHOOK_BAITERS, tier: "Baiters", color: 16776960 };
-    // Use fallback
-    const tierName = fallback.tier;
-    const bestLine = (best.DisplayName || best.name) + " [$" + (best.Generation || best.gen || "?") + "]";
-    let otherText = "";
-    if (brainrotsList.length > 1) {
-      for (let i = 1; i < Math.min(brainrotsList.length, 8); i++) {
-        const b = brainrotsList[i];
-        otherText += "• " + (b.DisplayName || b.name) + " [$" + (b.Generation || b.gen || "?") + "]\n";
-      }
-    } else {
-      otherText = "Aucun autre";
-    }
-    const thumbUrl = best.imageUrl || best.image || BOT_AVATAR;
-    const embed = {
-      title: "🌸 ZENO NOTIFIER | " + tierName + " 🌸 (TEST FALLBACK)",
-      color: fallback.color,
-      thumbnail: { url: thumbUrl },
-      fields: [
-        { name: "🏷️ Best", value: bestLine, inline: false },
-        { name: "🐾 Other", value: "```\n" + otherText + "```", inline: false },
-        { name: "🌍 JobId", value: "```" + jobId + "```", inline: false },
-        { name: "📡 Region", value: brainrotsList[0].Region || brainrotsList[0].region || "Germany", inline: true }
-      ],
-      footer: { text: "ZENO HUB • " + new Date().toLocaleString("fr-FR") },
-      timestamp: new Date().toISOString()
-    };
-    const payload = { embeds: [embed] };
-    fetch(fallback.url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }).then(r => console.log("[WEBHOOK FALLBACK] Sent", r.status)).catch(e => console.log("[WEBHOOK FALLBACK] Error", e));
-    return;
-  }
-  const tierName = webhook.tier;
-  // Best
-  const bestLine = (best.DisplayName || best.name) + " [$" + (best.Generation || best.gen || "?") + "]";
-  // Other
-  let otherText = "";
-  if (brainrotsList.length > 1) {
-    for (let i = 1; i < Math.min(brainrotsList.length, 8); i++) {
-      const b = brainrotsList[i];
-      otherText += "• " + (b.DisplayName || b.name) + " [$" + (b.Generation || b.gen || "?") + "]\n";
-    }
-  } else {
-    otherText = "Aucun autre";
-  }
-  // Image du Best - on utilise son asset si on l'a, sinon logo
-  const thumbUrl = best.imageUrl || best.image || BOT_AVATAR;
-  const embed = {
-    title: "🌸 ZENO NOTIFIER | " + tierName + " 🌸",
-    color: 16776960,
-    thumbnail: { url: thumbUrl },
-    fields: [
-      { name: "🏷️ Best", value: bestLine, inline: false },
-      { name: "🐾 Other", value: "```\n" + otherText + "```", inline: false }
-    ],
-    footer: { text: "discord.gg/rxSgePB2g | v0810.0030\n" + new Date().toLocaleString("fr-FR", { day: "2-digit", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" }) },
-    timestamp: new Date().toISOString()
-  };
-  fetch(webhook.url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      username: "ZENO NOTIFIER",
-      avatar_url: BOT_AVATAR,
-      embeds: [embed]
-    })
-  }).catch(()=>{});
-  console.log("[DISCORD] Sent " + tierName + " - " + bestLine + " -> " + webhook.url.slice(0,60));
-}
-
 function sendWebhook(url, title, desc, color, mention) {
   if (!url) return;
-  fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username: "ZENO NOTIFIER", avatar_url: BOT_AVATAR, content: mention || "", embeds: [{ title, description: desc, color, timestamp: new Date().toISOString(), footer: { text: "discord.gg/rxSgePB2g | v0810.0030" } }] })
-  }).catch(()=>{});
+  fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: mention || "", embeds: [{ title, description: desc, color, timestamp: new Date().toISOString(), footer: { text: "ZENO AJ - Live" } }] }) }).catch(()=>{});
 }
 
-// === BROADCAST ===
 function broadcast(obj, except = null) {
   const data = JSON.stringify(obj);
   for (const ws of clients) {
@@ -234,72 +112,14 @@ function sendSnapshot(ws) {
   }
   jobsArray.sort((a,b) => (b.priority||0) - (a.priority||0));
   const usersArray = Array.from(activeUsers.entries()).map(([uid, info]) => ({ user_id: uid, division_name: info.division || "1/1", plan: info.plan || "active", region: info.region || "ALL" }));
-  ws.send(JSON.stringify({ op: "SNAPSHOT", bestToday, jobs: jobsArray, active_users: activeUsers.size, users: usersArray, server_time: Math.floor(Date.now()/1000), stats }));
+  ws.send(JSON.stringify({ op: "SNAPSHOT", jobs: jobsArray, active_users: activeUsers.size, users: usersArray, server_time: Math.floor(Date.now()/1000), stats }));
 }
 
-// === BOT SCANNER - TYPE 2 - NOUVEAU ===
-async function fetchPublicServers() {
-  // On recupere la liste des serveurs publics Roblox pour Steal a Brainrot
-  try {
-    const res = await fetch(`https://games.roblox.com/v1/games/${PLACE_ID}/servers/Public?limit=100&sortOrder=Desc`);
-    const data = await res.json();
-    return data.data || [];
-  } catch(e) {
-    console.log("[BOT] Erreur fetch serveurs Roblox:", e.message);
-    return [];
-  }
-}
-
-async function botScanLoop() {
-  // Toutes les 30s, on lance un scan
-  console.log(`[BOT] Scan demarre - ${BOT_COUNT} bots - Clients connectes: ${clients.size}`);
-  stats.botScans++;
-  const servers = await fetchPublicServers();
-  console.log(`[BOT] ${servers.length} serveurs publics trouves`);
-  // On cree des jobs pour les serveurs que personne n'a encore scanne
-  for (let i = 0; i < Math.min(servers.length, BOT_COUNT); i++) {
-    const srv = servers[i];
-    const jobId = srv.id;
-    if (jobs.has(jobId)) continue;
-    // On cree un job vide, les bots vont le remplir quand ils rejoignent
-    const job = {
-      animals: [],
-      job_start_time: Math.floor(Date.now()/1000),
-      region: "ALL",
-      priority: 0,
-      payload: { animals: [] },
-      botAssigned: `BOT_${i+1}`,
-      playing: srv.playing,
-      maxPlayers: srv.maxPlayers
-    };
-    jobs.set(jobId, job);
-    stats.botJobs++;
-    // On broadcast aux clients pour qu'ils aillent checker ce serveur
-    broadcast({ op: "BOT_JOB", jobId, botId: `BOT_${i+1}`, playing: srv.playing, maxPlayers: srv.maxPlayers, server_time: Math.floor(Date.now()/1000) });
-    console.log(`[BOT] BOT_${i+1} assigne a ${jobId} (${srv.playing}/${srv.maxPlayers} joueurs)`);
-  }
-  // On met a jour les bots
-  for (let i = 1; i <= BOT_COUNT; i++) {
-    bots.set(`BOT_${i}`, { lastScan: Date.now(), status: "scanning", jobId: null });
-  }
-    }
-
-// On lance le bot scanner toutes les 30s
-setInterval(botScanLoop, BOT_SCAN_INTERVAL);
-// On lance un premier scan au demarrage
-setTimeout(botScanLoop, 5000);
-
-// === HTTP SERVER (comme V3 + /bots) ===
 const server = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   if (req.url === '/health' || req.url === '/status') {
     res.writeHead(200, {'Content-Type':'application/json'});
-    res.end(JSON.stringify({ ok: true, status: 'healthy', version: 'V4-BOTS', type: 'TYPE 2 - BOTS', clients: clients.size, jobs: jobs.size, bots: BOT_COUNT, botsActive: bots.size, uptime: process.uptime(), bestToday, stats, globalFilter }));
-    return;
-  }
-  if (req.url === '/bots') {
-    res.writeHead(200, {'Content-Type':'application/json'});
-    res.end(JSON.stringify({ bots: Array.from(bots.entries()), botCount: BOT_COUNT, botScans: stats.botScans, botJobs: stats.botJobs }));
+    res.end(JSON.stringify({ ok: true, status: 'healthy', version: 'V4 FINAL', clients: clients.size, jobs: jobs.size, uptime: process.uptime(), stats, globalFilter }));
     return;
   }
   if (req.url.startsWith('/validate')) {
@@ -340,62 +160,75 @@ const server = http.createServer((req, res) => {
   }
   if (req.url.endsWith('/time')) { res.writeHead(200, {'Content-Type':'text/plain'}); res.end(String(Math.floor(Date.now()/1000))); return; }
   res.writeHead(200, {'Content-Type':'text/plain'});
-  res.end('ZENO WS Server V4 - TYPE 2 BOTS is running. Connect via ws://host' + PATH + ' | Bots: ' + BOT_COUNT);
+  res.end('ZENO WS Server V4 FINAL is running. Connect via ws://host' + PATH);
 });
 
-// === WEBSOCKET V4 ===
 const wss = new WebSocket.Server({ server, path: PATH });
+
 wss.on('connection', (ws, req) => {
   const url = new URL(req.url, 'http://' + req.headers.host);
   const userId = url.searchParams.get('userId') || 'unknown';
   const key = url.searchParams.get('key') || '';
   const region = url.searchParams.get('region') || 'ALL';
   const sessionId = url.searchParams.get('sessionId') || (userId + '_' + Date.now() + '_' + Math.random().toString(36).slice(2,8));
-  const isBot = userId.startsWith('BOT_') || url.searchParams.get('isBot') === 'true';
   const isZenoKey = KEYS && KEYS[key];
-  if (SECRET && key !== SECRET && key !== 'public-test' && key !== '' && !isZenoKey && !isBot) {
+  if (SECRET && key !== SECRET && key !== 'public-test' && key !== '' && !isZenoKey) {
     ws.send(JSON.stringify({ op: "KICK", reason: "[ZENO WS V4] Key invalide" }));
     ws.close();
-    console.log('[REJECT] ' + userId);
     return;
   }
+
   ws._filter = { min: globalFilter.min, mutation: globalFilter.mutation, region: region };
   ws._userId = userId;
   ws._sessionId = sessionId;
   ws._region = region;
-  ws._isBot = isBot;
   ws.isAlive = true;
   ws._lastPing = Date.now();
   ws._rate = { count: 0, reset: Date.now() };
-  console.log('[CONNECT V4] ' + userId + (isBot ? ' [BOT]' : '') + ' region=' + region + ' total=' + (clients.size+1));
+
+  console.log('[CONNECT V4] ' + userId + ' region=' + region + ' session=' + sessionId + ' total=' + (clients.size+1));
   clients.add(ws);
-  activeUsers.set(userId, { userId, lastSeen: Date.now(), region, filter: ws._filter, sessionId, isBot });
+  activeUsers.set(userId, { userId, lastSeen: Date.now(), region, filter: ws._filter, sessionId });
+
   let missed = [];
-  if (sessions.has(sessionId)) { missed = sessions.get(sessionId).missedJobs || []; }
+  if (sessions.has(sessionId)) {
+    const sess = sessions.get(sessionId);
+    missed = sess.missedJobs || [];
+    console.log('[RECONNECT] ' + userId + ' missed=' + missed.length);
+  }
   sessions.set(sessionId, { userId, missedJobs: [], lastSeen: Date.now() });
-  const jobsArrayInit = Array.from(jobs.entries()).map(([jobId, j]) => ({ jobId, animals: j.animals, job_start_time: j.job_start_time, region: j.region, priority: j.priority, payload: { animals: j.animals } }));
+
+  const jobsArrayInit = Array.from(jobs.entries()).map(([jobId, j]) => ({ jobId, _enc: null, jid: jobId, animals: j.animals, job_start_time: j.job_start_time, region: j.region, priority: j.priority, payload: { animals: j.animals } }));
   ws.send(JSON.stringify({ op: "INIT", data: { server_time: Math.floor(Date.now()/1000), jobs: jobsArrayInit, active_users: activeUsers.size, sessionId, reconnect: missed.length > 0 } }));
   sendSnapshot(ws);
-  ws.send(JSON.stringify({ op: "STATUS", server_time: Math.floor(Date.now()/1000), active_users: activeUsers.size, region, bestToday, bots: BOT_COUNT }));
-  if (missed.length > 0) ws.send(JSON.stringify({ op: "MISSED_JOBS", jobs: missed, count: missed.length }));
+  ws.send(JSON.stringify({ op: "STATUS", server_time: Math.floor(Date.now()/1000), active_users: activeUsers.size, region }));
+  if (missed.length > 0) {
+    ws.send(JSON.stringify({ op: "MISSED_JOBS", jobs: missed, count: missed.length }));
+  }
+
   ws.on('pong', () => { ws.isAlive = true; ws._lastPing = Date.now(); });
+
   ws.on('message', (raw) => {
     const rawStr = raw.toString();
     if (rawStr === "READY") {
-      const arr = Array.from(jobs.entries()).map(([jobId, j]) => ({ jobId, animals: j.animals, job_start_time: j.job_start_time, region: j.region, payload: { animals: j.animals } }));
+      const arr = Array.from(jobs.entries()).map(([jobId, j]) => ({ jobId, _enc: null, jid: jobId, animals: j.animals, job_start_time: j.job_start_time, region: j.region, payload: { animals: j.animals } }));
       try { ws.send(JSON.stringify({ op: "INIT", data: { server_time: Math.floor(Date.now()/1000), jobs: arr, active_users: activeUsers.size, sessionId } })); } catch(e) {}
       return;
     }
     let msg;
     try { msg = JSON.parse(rawStr); } catch(e) { return; }
-    activeUsers.set(userId, { userId, lastSeen: Date.now(), region, filter: ws._filter, sessionId, isBot });
+    activeUsers.set(userId, { userId, lastSeen: Date.now(), region, filter: ws._filter, sessionId });
+
     const now = Date.now();
     if (now - ws._rate.reset > 10000) { ws._rate.count = 0; ws._rate.reset = now; }
     ws._rate.count++;
     if (ws._rate.count > 100) return;
+
     if (msg.op === "PING" || msg.op === "PONG") {
-      ws.isAlive = true; ws._lastPing = Date.now(); stats.pings++;
-      ws.send(JSON.stringify({ op: "PONG", server_time: Math.floor(Date.now()/1000), ping: msg.ts || Date.now() }));
+      ws.isAlive = true;
+      ws._lastPing = Date.now();
+      stats.pings++;
+      ws.send(JSON.stringify({ op: "PONG", server_time: Math.floor(Date.now()/1000), ping: msg.ts || Date.now(), latency: Date.now() - (msg.ts || Date.now()) }));
       return;
     }
     if (msg.op === "SET_FILTER") {
@@ -424,14 +257,17 @@ wss.on('connection', (ws, req) => {
         if (!matchesFilter(a, globalFilter)) continue;
         const total = parseValue(a.Generation || "");
         stats.totalPets++;
-        const isOG = getPriority(a) >= 95 && getPriority(a) < 100;
-        const isSecret = getPriority(a) >= 100;
-        if (isOG) { stats.ogCount++; sendWebhook(OG_WEBHOOK, "OG LOGGED - " + (a.DisplayName || a.name), (a.DisplayName || a.name) + " - " + (a.Generation || "") + " - Mutation: " + getMutationStr(a) + " - Job: " + jobId, 16711680, "@everyone @here"); }
-        if (isSecret) stats.secretCount++;
+        const prio = getPriority(a);
+        if (prio >= 95) { 
+          // OG -> @everyone @here
+          stats.ogCount++;
+          if (prio >= 100) stats.secretCount++;
+          sendWebhook(OG_WEBHOOK, "OG LOGGED - " + (a.DisplayName || a.name), (a.DisplayName || a.name) + " - " + (a.Generation || "") + " - Mutation: " + getMutationStr(a) + " - Job: " + jobId + " - Region: " + regionJob, 16711680, "@everyone @here");
+        }
         a.mutation_str = getMutationStr(a);
-        a.priority = getPriority(a);
-        a.is_og = isOG;
-        a.is_secret = isSecret;
+        a.priority = prio;
+        a.is_og = prio >= 95 && prio < 100;
+        a.is_secret = prio >= 100;
         a.region = regionJob;
         filteredAnimals.push(a);
       }
@@ -439,33 +275,27 @@ wss.on('connection', (ws, req) => {
       filteredAnimals.sort((x,y) => (y.priority||0) - (x.priority||0));
       const priority = Math.max(...filteredAnimals.map(a => a.priority || 0));
       jobs.set(jobId, { animals: filteredAnimals, job_start_time: msg.job_start_time || Math.floor(Date.now()/1000), region: regionJob, priority, payload: { animals: filteredAnimals } });
-      const out = { op: "JOB", jobId, job_start_time: jobs.get(jobId).job_start_time, region: regionJob, priority, payload: { animals: filteredAnimals }, userId, active_users: activeUsers.size };
+      const out = { op: "JOB", jobId, job_start_time: jobs.get(jobId).job_start_time, region: regionJob, priority, payload: { animals: filteredAnimals }, userId, active_users: activeUsers.size, users: Array.from(activeUsers.entries()).map(([uid, info]) => ({ user_id: uid, division_name: info.division || '1/1', region: info.region || 'ALL' })) };
       for (const [sid, sess] of sessions) { if (sess.missedJobs.length < 50) sess.missedJobs.push(out); }
       stats.jobsBroadcast++;
-      // NOUVEAU V4 : On envoie aussi dans Discord avec le design Dragon
-      sendDiscordLog(filteredAnimals, jobId, null);
       if (priority >= 90) broadcastFast(out, ws); else broadcastBatch(out, ws);
-      console.log('[JOB V4] ' + jobId + ' prio=' + priority + ' from ' + userId + (isBot ? ' [BOT]' : '') + ' animals=' + filteredAnimals.length);
+      console.log('[JOB V4] ' + jobId + ' prio=' + priority + ' region=' + regionJob + ' from ' + userId + ' animals=' + filteredAnimals.length);
     }
     if (msg.op === "STEAL") { broadcastFast({ op: "STEAL", payload: msg.payload, sig: msg.sig, ts: msg.ts }, ws); }
-    if (msg.op === "DELETE" && msg.jobId) { jobs.delete(msg.jobId); broadcast({ op: "DELETE", job_id: msg.jobId }, ws); }
-    if (msg.op === "HEARTBEAT") { ws.isAlive = true; ws._lastPing = Date.now(); ws.send(JSON.stringify({ op: "HEARTBEAT_ACK", server_time: Math.floor(Date.now()/1000) })); }
-    if (msg.op === "BOT_SCAN_RESULT") {
-      // Un bot qui a scanne un serveur et qui renvoie ce qu'il a trouve
-      console.log('[BOT RESULT] from ' + userId + ' job=' + msg.jobId + ' animals=' + (msg.animals || []).length);
-      // On traite comme un JOB normal
-      msg.op = "JOB";
-      // On re-emet comme JOB
-      ws.emit('message', JSON.stringify(msg));
+    if (msg.op === "DELETE" && msg.jobId) {
+      jobs.delete(msg.jobId);
+      broadcast({ op: "DELETE", job_id: msg.jobId }, ws);
     }
+    if (msg.op === "HEARTBEAT") { ws.isAlive = true; ws._lastPing = Date.now(); ws.send(JSON.stringify({ op: "HEARTBEAT_ACK", server_time: Math.floor(Date.now()/1000) })); }
   });
+
   ws.on('close', () => {
     clients.delete(ws);
     setTimeout(() => {
       const u = activeUsers.get(userId);
       if (u && Date.now() - u.lastSeen > 60000) activeUsers.delete(userId);
     }, 60000);
-    console.log('[DISCONNECT V4] ' + userId + ' keep 60s');
+    console.log('[DISCONNECT V4] ' + userId + ' session=' + sessionId);
   });
   ws.on('error', () => { try { ws.terminate(); } catch(e) {} });
 });
@@ -474,6 +304,7 @@ setInterval(() => {
   const now = Date.now();
   for (const ws of clients) {
     if (!ws.isAlive || now - ws._lastPing > 30000) {
+      console.log('[TIMEOUT] ' + ws._userId + ' no pong 30s');
       try { ws.terminate(); } catch(e) {}
       clients.delete(ws);
       continue;
@@ -493,10 +324,7 @@ setInterval(() => {
 }, 15000);
 
 server.listen(PORT, () => {
-  console.log('[ZENO WS V4 - TYPE 2 BOTS] Listening on port ' + PORT);
-  console.log('[ZENO WS V4] Path: ' + PATH);
-  console.log('[ZENO WS V4] Bots: ' + BOT_COUNT + ' - Ils scannent meme quand personne utilise AJ');
-  console.log('[ZENO WS V4] Webhooks: Baiters / Midlight / Highlight / Peaklight');
-  console.log('[ZENO WS V4] Bot: ZENO NOTIFIER - Avatar logo 101728419925095');
+  console.log('[ZENO WS V4 FINAL] Listening on port ' + PORT);
+  console.log('[ZENO WS V4 FINAL] Rapide + Reconnect + Ping/Pong + OG @everyone @here + Best Today SUPPRIME');
 });
-        
+       
