@@ -1,6 +1,5 @@
-// server.js - ZENO WS LOADER V17 - KICK SI TOKEN EXPIRE/FAUX + 1 SEUL COMPTE PAR TOKEN
-// Si token expiré/faux/blacklist -> Kick avec message ZENO
-// Si autre pseudo utilise le token -> Kick "Wrong profile"
+// server.js - ZENO WS LOADER V18 - KICK MESSAGES SIMPLES
+// Tous les kicks = juste "ZENO | ..." sans détails
 
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -37,9 +36,7 @@ async function getAJ() {
   return text;
 }
 
-// Helper: retourne du Lua qui kick le joueur avec un message ZENO
 function kickLua(msg) {
-  // Échappe les guillemets pour Lua
   const safe = String(msg).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, ' ');
   return 'game:GetService("Players").LocalPlayer:Kick("' + safe + '")';
 }
@@ -50,51 +47,41 @@ app.get('/health', (req, res) => res.send('OK'));
 app.get('/loader', async (req, res) => {
   res.set('Content-Type', 'text/plain');
   try {
-    // Protection navigateur
     const ua = (req.headers['user-agent'] || '').toLowerCase();
     const isBrowser = (ua.includes('mozilla') || ua.includes('chrome') || ua.includes('safari') || ua.includes('firefox') || ua.includes('edg')) && !ua.includes('roblox');
     if (isBrowser) return res.send('error("Ouvre pas dans le navigateur, lance dans Roblox")');
 
     const token = (req.query.token || '').trim();
-    if (!token) return res.send(kickLua('ZENO | No token - Get your token in Discord'));
+    if (!token) return res.send(kickLua('ZENO | No token'));
 
-    // 1. Token existe ?
     const { data: tokenData, error: tokenErr } = await supabase.from('tokens').select('*').eq('token', token).maybeSingle();
-    if (tokenErr) return res.send(kickLua('ZENO | Supabase error - Try again later'));
-    if (!tokenData) return res.send(kickLua('ZENO | Invalid token - This token does not exist, get a new one in Discord'));
+    if (tokenErr) return res.send(kickLua('ZENO | Supabase error'));
+    if (!tokenData) return res.send(kickLua('ZENO | Invalid token'));
 
-    // 2. Token expiré ? -> KICK avec temps
     if (new Date(tokenData.expires_at).getTime() < Date.now()) {
-      return res.send(kickLua('ZENO | Token expired - Your ' + tokenData.jours + ' days expired, get a new token in Discord'));
+      return res.send(kickLua('ZENO | Token expired'));
     }
-    // 3. Token frozen ?
-    if (tokenData.frozen) return res.send(kickLua('ZENO | Logs down - Timers frozen, try again later'));
+    if (tokenData.frozen) return res.send(kickLua('ZENO | Logs down'));
 
-    // 4. Blacklist ?
     const { data: bl } = await supabase.from('blacklist').select('*').eq('roblox_pseudo', tokenData.roblox_pseudo).maybeSingle();
-    if (bl) return res.send(kickLua('ZENO | You are blacklisted - Reason: ' + (bl.raison || 'No reason')));
+    if (bl) return res.send(kickLua('ZENO | Blacklisted'));
 
-    // 5. Whitelist ?
     const { data: wl } = await supabase.from('whitelist').select('*').eq('roblox_pseudo', tokenData.roblox_pseudo).maybeSingle();
-    if (!wl) return res.send(kickLua('ZENO | Not whitelisted - Ask staff in Discord'));
+    if (!wl) return res.send(kickLua('ZENO | Not whitelisted'));
 
-    // 6. Freeze global ?
     const { data: freezeData } = await supabase.from('freeze').select('*').eq('id', 1).maybeSingle();
-    if (freezeData && freezeData.frozen) return res.send(kickLua('ZENO | Logs down - Timers frozen, try again later'));
+    if (freezeData && freezeData.frozen) return res.send(kickLua('ZENO | Logs down'));
 
     console.log('[WS] OK ' + tokenData.roblox_pseudo + ' - token ' + token.slice(0,12) + '...');
 
     let ajCode;
-    try { ajCode = await getAJ(); } catch(e) { return res.send(kickLua('ZENO | GitHub AJ error - Try again later')); }
+    try { ajCode = await getAJ(); } catch(e) { return res.send(kickLua('ZENO | GitHub error')); }
 
-    // 7. PROTECTION 1 SEUL COMPTE PAR TOKEN
-    // Le WS injecte le pseudo attendu, et le code vérifie que le joueur qui lance est bien ce pseudo.
-    // Si une autre personne utilise le même token avec un autre compte Roblox, ça kick "Wrong profile".
     const expectedPseudo = String(tokenData.roblox_pseudo).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
     const protectionCode =
       'local _ZENO_LOCAL = game:GetService("Players").LocalPlayer\n' +
       'if _ZENO_LOCAL and _ZENO_LOCAL.Name ~= "' + expectedPseudo + '" then\n' +
-      '  _ZENO_LOCAL:Kick("ZENO | Wrong profile - This token is for ' + expectedPseudo + ', not for " .. _ZENO_LOCAL.Name)\n' +
+      '  _ZENO_LOCAL:Kick("ZENO | Wrong profile")\n' +
       '  return\n' +
       'end\n' +
       'getgenv().SESSION_TOKEN = "' + token + '"\n' +
@@ -105,9 +92,8 @@ app.get('/loader', async (req, res) => {
 
   } catch(e) {
     console.log('[WS] /loader crash:', e);
-    return res.send(kickLua('ZENO | WS error - Try again later'));
+    return res.send(kickLua('ZENO | WS error'));
   }
 });
 
 app.listen(PORT, () => console.log('[ZENO WS] Sur port ' + PORT));
-  
