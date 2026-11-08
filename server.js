@@ -1,6 +1,4 @@
-// server.js - ZENO WS V21 - GITHUB ERROR FIX - Essaie V204, V203, V201
-// Si tu as renommé ton fichier AJ, le WS va quand même le trouver
-
+// server.js - ZENO WS V23 - DIAGNOSTIC GITHUB - Dit pourquoi GitHub error (404, 401, 403)
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 global.WebSocket = require('ws');
@@ -18,7 +16,6 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
   global: { fetch: global.fetch }
 });
 
-// PROPRE : 1 seul fichier AJ, plus de V201/V203/V204
 const GITHUB_AJ_URL = "https://raw.githubusercontent.com/ZENOHUBPAID/aj.lua/main/ZENO_AJ.lua";
 
 let cachedAJ = null;
@@ -29,12 +26,21 @@ async function getAJ() {
   const headers = {};
   if (GITHUB_TOKEN) headers['Authorization'] = 'token ' + GITHUB_TOKEN;
   console.log('[WS] Try GitHub AJ:', GITHUB_AJ_URL);
-  console.log('[WS] GITHUB_TOKEN présent ?', !!GITHUB_TOKEN, 'commence par', GITHUB_TOKEN ? GITHUB_TOKEN.slice(0,12) : 'AUCUN');
+  console.log('[WS] GITHUB_TOKEN présent ?', !!GITHUB_TOKEN, 'longueur', GITHUB_TOKEN.length, 'commence par', GITHUB_TOKEN ? GITHUB_TOKEN.slice(0, 12) : 'AUCUN');
   const res = await fetch(GITHUB_AJ_URL, { headers });
   console.log('[WS] GitHub status:', res.status);
-  if (!res.ok) throw new Error('GitHub AJ fetch failed status ' + res.status + ' - Vérifie que le fichier ZENO_AJ.lua existe sur GitHub et que GITHUB_TOKEN est bon');
+  if (!res.ok) {
+    // On garde le vrai code d'erreur pour le diagnostic
+    const err = new Error('GITHUB_' + res.status);
+    err.status = res.status;
+    throw err;
+  }
   const text = await res.text();
-  if (text.length < 100 || text.includes('404: Not Found') || text.includes('<html')) throw new Error('AJ GitHub 404 - Fichier ZENO_AJ.lua introuvable');
+  if (text.length < 100 || text.includes('404: Not Found') || text.includes('<html')) {
+    const err = new Error('GITHUB_404_HTML');
+    err.status = 404;
+    throw err;
+  }
   cachedAJ = text;
   lastFetch = Date.now();
   console.log('[WS] ✅ AJ trouvé, len', text.length);
@@ -46,8 +52,19 @@ function kickLua(msg) {
   return 'game:GetService("Players").LocalPlayer:Kick("' + safe + '")';
 }
 
-app.get('/', (req, res) => res.send('ZENO WS LOADER ONLINE - us-east - V22 PROPRE'));
+app.get('/', (req, res) => res.send('ZENO WS V23 DIAGNOSTIC - GITHUB_TOKEN présent: ' + (!!GITHUB_TOKEN) + ' len: ' + GITHUB_TOKEN.length));
 app.get('/health', (req, res) => res.send('OK'));
+
+// Route test pour voir si GitHub marche sans passer par Roblox
+app.get('/test-github', async (req, res) => {
+  res.set('Content-Type', 'application/json');
+  try {
+    const aj = await getAJ();
+    return res.json({ ok: true, len: aj.length, token_present: !!GITHUB_TOKEN, token_start: GITHUB_TOKEN ? GITHUB_TOKEN.slice(0,12) : null });
+  } catch(e) {
+    return res.json({ ok: false, error: e.message, status: e.status || null, token_present: !!GITHUB_TOKEN, token_start: GITHUB_TOKEN ? GITHUB_TOKEN.slice(0,12) : null, token_len: GITHUB_TOKEN.length });
+  }
+});
 
 app.get('/info', async (req, res) => {
   res.set('Content-Type', 'application/json');
@@ -70,23 +87,13 @@ app.get('/info', async (req, res) => {
     const isFrozen = !!(tokenData.frozen || globalFrozen);
     const isExpired = expiresMs < nowMs;
     return res.json({
-      ok: true,
-      pseudo: tokenData.roblox_pseudo,
-      discord_id: tokenData.discord_id,
-      region: tokenData.region,
-      expires_at: tokenData.expires_at,
-      remaining_seconds: remainingSec,
+      ok: true, pseudo: tokenData.roblox_pseudo, discord_id: tokenData.discord_id, region: tokenData.region,
+      expires_at: tokenData.expires_at, remaining_seconds: remainingSec,
       remaining_text: days + 'j ' + hours + 'h ' + mins + 'm ' + secs + 's',
-      days, hours, mins, secs,
-      frozen: isFrozen,
-      global_frozen: globalFrozen,
-      expired: isExpired,
+      days, hours, mins, secs, frozen: isFrozen, global_frozen: globalFrozen, expired: isExpired,
       status: isExpired ? 'Expiré' : (isFrozen ? 'Freezé' : 'Connecté')
     });
-  } catch(e) {
-    console.log('[WS] /info crash:', e);
-    return res.json({ ok: false, error: 'WS error' });
-  }
+  } catch(e) { return res.json({ ok: false, error: 'WS error' }); }
 });
 
 app.get('/loader', async (req, res) => {
@@ -108,9 +115,16 @@ app.get('/loader', async (req, res) => {
     if (!wl) return res.send(kickLua('ZENO | Not whitelisted'));
     const { data: freezeData } = await supabase.from('freeze').select('*').eq('id', 1).maybeSingle();
     if (freezeData && freezeData.frozen) return res.send(kickLua('ZENO | Logs down'));
-    console.log('[WS] OK ' + tokenData.roblox_pseudo + ' - token ' + token.slice(0,12) + '...');
+    console.log('[WS] OK ' + tokenData.roblox_pseudo);
     let ajCode;
-    try { ajCode = await getAJ(); } catch(e) { console.log('[WS] getAJ error:', e.message); return res.send(kickLua('ZENO | GitHub error')); }
+    try { ajCode = await getAJ(); } catch(e) {
+      console.log('[WS] getAJ error:', e.message);
+      // Diagnostic : on kick avec le vrai code GitHub pour que tu voies dans Roblox
+      if (e.status === 404) return res.send(kickLua('ZENO | GitHub 404 - Fichier ZENO_AJ.lua introuvable sur GitHub'));
+      if (e.status === 401) return res.send(kickLua('ZENO | GitHub 401 - Token GITHUB_TOKEN mort ou faux'));
+      if (e.status === 403) return res.send(kickLua('ZENO | GitHub 403 - Token a pas accès au repo aj.lua'));
+      return res.send(kickLua('ZENO | GitHub error ' + e.message));
+    }
     const expectedPseudo = String(tokenData.roblox_pseudo).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
     const protectionCode =
       'local _ZENO_LOCAL = game:GetService("Players").LocalPlayer\n' +
@@ -122,10 +136,7 @@ app.get('/loader', async (req, res) => {
       'getgenv().USERNAME = "' + expectedPseudo + '"\n' +
       'getgenv().DISCORD_ID = "' + tokenData.discord_id + '"\n';
     return res.send(protectionCode + ajCode);
-  } catch(e) {
-    console.log('[WS] /loader crash:', e);
-    return res.send(kickLua('ZENO | WS error'));
-  }
+  } catch(e) { return res.send(kickLua('ZENO | WS error')); }
 });
 
 app.listen(PORT, () => console.log('[ZENO WS] Sur port ' + PORT));
