@@ -1,4 +1,6 @@
-// server.js - ZENO WS V23 - DIAGNOSTIC GITHUB - Dit pourquoi GitHub error (404, 401, 403)
+// server.js - ZENO WS V24 - FIX GITHUB 404 - Bearer + API fallback
+// Le token fine-grained a besoin de Bearer, pas de "token"
+
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 global.WebSocket = require('ws');
@@ -17,33 +19,48 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
 });
 
 const GITHUB_AJ_URL = "https://raw.githubusercontent.com/ZENOHUBPAID/aj.lua/main/ZENO_AJ.lua";
+const GITHUB_API_URL = "https://api.github.com/repos/ZENOHUBPAID/aj.lua/contents/ZENO_AJ.lua";
 
 let cachedAJ = null;
 let lastFetch = 0;
 
 async function getAJ() {
   if (cachedAJ && Date.now() - lastFetch < 60000) return cachedAJ;
-  const headers = {};
-  if (GITHUB_TOKEN) headers['Authorization'] = 'token ' + GITHUB_TOKEN;
-  console.log('[WS] Try GitHub AJ:', GITHUB_AJ_URL);
-  console.log('[WS] GITHUB_TOKEN présent ?', !!GITHUB_TOKEN, 'longueur', GITHUB_TOKEN.length, 'commence par', GITHUB_TOKEN ? GITHUB_TOKEN.slice(0, 12) : 'AUCUN');
-  const res = await fetch(GITHUB_AJ_URL, { headers });
-  console.log('[WS] GitHub status:', res.status);
-  if (!res.ok) {
-    // On garde le vrai code d'erreur pour le diagnostic
-    const err = new Error('GITHUB_' + res.status);
-    err.status = res.status;
+  // FIX : Bearer pour fine-grained, pas "token"
+  const headers = { 'User-Agent': 'ZENO-WS', 'Accept': 'application/vnd.github.raw' };
+  if (GITHUB_TOKEN) headers['Authorization'] = 'Bearer ' + GITHUB_TOKEN;
+  console.log('[WS] Try GitHub RAW:', GITHUB_AJ_URL);
+  console.log('[WS] Token présent ?', !!GITHUB_TOKEN, 'len', GITHUB_TOKEN.length, 'start', GITHUB_TOKEN ? GITHUB_TOKEN.slice(0,12) : 'AUCUN');
+  let res = await fetch(GITHUB_AJ_URL, { headers });
+  console.log('[WS] RAW status:', res.status);
+  if (res.ok) {
+    const text = await res.text();
+    if (text.length > 100 && !text.includes('404: Not Found') && !text.includes('<html')) {
+      cachedAJ = text; lastFetch = Date.now();
+      console.log('[WS] ✅ AJ via RAW, len', text.length);
+      return text;
+    }
+    console.log('[WS] RAW a renvoyé du HTML, on essaie API');
+  }
+  // Fallback API GitHub - donne un meilleur message d'erreur
+  console.log('[WS] Try GitHub API:', GITHUB_API_URL);
+  const apiHeaders = { 'User-Agent': 'ZENO-WS', 'Accept': 'application/vnd.github+json' };
+  if (GITHUB_TOKEN) apiHeaders['Authorization'] = 'Bearer ' + GITHUB_TOKEN;
+  const apiRes = await fetch(GITHUB_API_URL, { headers: apiHeaders });
+  console.log('[WS] API status:', apiRes.status);
+  if (!apiRes.ok) {
+    const err = new Error('GITHUB_' + apiRes.status);
+    err.status = apiRes.status;
+    // On lit le message de GitHub pour le log
+    try { const j = await apiRes.text(); console.log('[WS] API error body:', j.slice(0,500)); } catch(_) {}
     throw err;
   }
-  const text = await res.text();
-  if (text.length < 100 || text.includes('404: Not Found') || text.includes('<html')) {
-    const err = new Error('GITHUB_404_HTML');
-    err.status = 404;
-    throw err;
-  }
-  cachedAJ = text;
-  lastFetch = Date.now();
-  console.log('[WS] ✅ AJ trouvé, len', text.length);
+  const apiJson = await apiRes.json();
+  if (!apiJson.content) throw new Error('GITHUB_API_NO_CONTENT');
+  const text = Buffer.from(apiJson.content, 'base64').toString('utf-8');
+  if (text.length < 100) throw new Error('GITHUB_API_EMPTY');
+  cachedAJ = text; lastFetch = Date.now();
+  console.log('[WS] ✅ AJ via API, len', text.length);
   return text;
 }
 
@@ -52,17 +69,16 @@ function kickLua(msg) {
   return 'game:GetService("Players").LocalPlayer:Kick("' + safe + '")';
 }
 
-app.get('/', (req, res) => res.send('ZENO WS V23 DIAGNOSTIC - GITHUB_TOKEN présent: ' + (!!GITHUB_TOKEN) + ' len: ' + GITHUB_TOKEN.length));
+app.get('/', (req, res) => res.send('ZENO WS V24 - Bearer Fix - Token présent: ' + (!!GITHUB_TOKEN)));
 app.get('/health', (req, res) => res.send('OK'));
 
-// Route test pour voir si GitHub marche sans passer par Roblox
 app.get('/test-github', async (req, res) => {
   res.set('Content-Type', 'application/json');
   try {
     const aj = await getAJ();
     return res.json({ ok: true, len: aj.length, token_present: !!GITHUB_TOKEN, token_start: GITHUB_TOKEN ? GITHUB_TOKEN.slice(0,12) : null });
   } catch(e) {
-    return res.json({ ok: false, error: e.message, status: e.status || null, token_present: !!GITHUB_TOKEN, token_start: GITHUB_TOKEN ? GITHUB_TOKEN.slice(0,12) : null, token_len: GITHUB_TOKEN.length });
+    return res.json({ ok: false, error: e.message, status: e.status || null, token_present: !!GITHUB_TOKEN, token_start: GITHUB_TOKEN ? GITHUB_TOKEN.slice(0,12) : null, token_len: GITHUB_TOKEN.length, hint: e.status===404 ? 'Token a pas accès au repo aj.lua OU fichier pas sur main' : e.status===401 ? 'Token mort' : e.status===403 ? 'Token a pas Contents Read-only' : '' });
   }
 });
 
@@ -119,10 +135,9 @@ app.get('/loader', async (req, res) => {
     let ajCode;
     try { ajCode = await getAJ(); } catch(e) {
       console.log('[WS] getAJ error:', e.message);
-      // Diagnostic : on kick avec le vrai code GitHub pour que tu voies dans Roblox
-      if (e.status === 404) return res.send(kickLua('ZENO | GitHub 404 - Fichier ZENO_AJ.lua introuvable sur GitHub'));
-      if (e.status === 401) return res.send(kickLua('ZENO | GitHub 401 - Token GITHUB_TOKEN mort ou faux'));
-      if (e.status === 403) return res.send(kickLua('ZENO | GitHub 403 - Token a pas accès au repo aj.lua'));
+      if (e.status === 404) return res.send(kickLua('ZENO | GitHub 404 - Token a pas accès au repo aj.lua'));
+      if (e.status === 401) return res.send(kickLua('ZENO | GitHub 401 - Token mort'));
+      if (e.status === 403) return res.send(kickLua('ZENO | GitHub 403 - Token a pas Contents Read'));
       return res.send(kickLua('ZENO | GitHub error ' + e.message));
     }
     const expectedPseudo = String(tokenData.roblox_pseudo).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
@@ -140,3 +155,4 @@ app.get('/loader', async (req, res) => {
 });
 
 app.listen(PORT, () => console.log('[ZENO WS] Sur port ' + PORT));
+                                                                         
