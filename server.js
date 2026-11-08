@@ -18,40 +18,27 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
   global: { fetch: global.fetch }
 });
 
-// On essaie les 3 noms possibles, dans l'ordre
-const GITHUB_AJ_URLS = [
-  "https://raw.githubusercontent.com/ZENOHUBPAID/aj.lua/main/ZENO_AJ_V204_INFO_FIX.lua",
-  "https://raw.githubusercontent.com/ZENOHUBPAID/aj.lua/main/ZENO_AJ_V203_INFO_SUBSCRIPTION.lua",
-  "https://raw.githubusercontent.com/ZENOHUBPAID/aj.lua/main/ZENO_AJ_V201_AFG_FIREBASE_LOGS.lua",
-];
+// PROPRE : 1 seul fichier AJ, plus de V201/V203/V204
+const GITHUB_AJ_URL = "https://raw.githubusercontent.com/ZENOHUBPAID/aj.lua/main/ZENO_AJ.lua";
 
 let cachedAJ = null;
 let lastFetch = 0;
-let lastGoodUrl = null;
 
 async function getAJ() {
   if (cachedAJ && Date.now() - lastFetch < 60000) return cachedAJ;
   const headers = {};
   if (GITHUB_TOKEN) headers['Authorization'] = 'token ' + GITHUB_TOKEN;
-  // Si on a déjà trouvé la bonne URL, on essaie celle-là en premier
-  const urls = lastGoodUrl ? [lastGoodUrl, ...GITHUB_AJ_URLS.filter(u => u !== lastGoodUrl)] : GITHUB_AJ_URLS;
-  let lastErr = null;
-  for (const url of urls) {
-    try {
-      console.log('[WS] Try GitHub AJ:', url);
-      const res = await fetch(url, { headers });
-      console.log('[WS] GitHub status:', res.status, 'for', url);
-      if (!res.ok) { lastErr = new Error('GitHub status ' + res.status + ' for ' + url); continue; }
-      const text = await res.text();
-      if (text.length < 100 || text.includes('404: Not Found') || text.includes('<html')) { lastErr = new Error('AJ 404 for ' + url); continue; }
-      cachedAJ = text;
-      lastFetch = Date.now();
-      lastGoodUrl = url;
-      console.log('[WS] ✅ AJ trouvé:', url, 'len', text.length);
-      return text;
-    } catch(e) { lastErr = e; console.log('[WS] GitHub fetch error for', url, e.message); }
-  }
-  throw lastErr || new Error('GitHub AJ fetch failed - tous les fichiers introuvables');
+  console.log('[WS] Try GitHub AJ:', GITHUB_AJ_URL);
+  console.log('[WS] GITHUB_TOKEN présent ?', !!GITHUB_TOKEN, 'commence par', GITHUB_TOKEN ? GITHUB_TOKEN.slice(0,12) : 'AUCUN');
+  const res = await fetch(GITHUB_AJ_URL, { headers });
+  console.log('[WS] GitHub status:', res.status);
+  if (!res.ok) throw new Error('GitHub AJ fetch failed status ' + res.status + ' - Vérifie que le fichier ZENO_AJ.lua existe sur GitHub et que GITHUB_TOKEN est bon');
+  const text = await res.text();
+  if (text.length < 100 || text.includes('404: Not Found') || text.includes('<html')) throw new Error('AJ GitHub 404 - Fichier ZENO_AJ.lua introuvable');
+  cachedAJ = text;
+  lastFetch = Date.now();
+  console.log('[WS] ✅ AJ trouvé, len', text.length);
+  return text;
 }
 
 function kickLua(msg) {
@@ -59,7 +46,7 @@ function kickLua(msg) {
   return 'game:GetService("Players").LocalPlayer:Kick("' + safe + '")';
 }
 
-app.get('/', (req, res) => res.send('ZENO WS LOADER ONLINE - us-east - V21 GitHub Fix'));
+app.get('/', (req, res) => res.send('ZENO WS LOADER ONLINE - us-east - V22 PROPRE'));
 app.get('/health', (req, res) => res.send('OK'));
 
 app.get('/info', async (req, res) => {
