@@ -1,5 +1,5 @@
-// server.js - ZENO WS LOADER V18 - KICK MESSAGES SIMPLES
-// Tous les kicks = juste "ZENO | ..." sans détails
+// server.js - ZENO WS LOADER V19 - KICK SIMPLE + /info POUR ONGLET INFO DU AJ
+// /info?token=... renvoie le timer, freeze, pseudo pour l'onglet Info
 
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -18,7 +18,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
   global: { fetch: global.fetch }
 });
 
-const GITHUB_AJ_URL = "https://raw.githubusercontent.com/ZENOHUBPAID/aj.lua/main/ZENO_AJ_V201_AFG_FIREBASE_LOGS.lua";
+const GITHUB_AJ_URL = "https://raw.githubusercontent.com/ZENOHUBPAID/aj.lua/main/ZENO_AJ_V203_INFO_SUBSCRIPTION.lua";
 
 let cachedAJ = null;
 let lastFetch = 0;
@@ -43,6 +43,51 @@ function kickLua(msg) {
 
 app.get('/', (req, res) => res.send('ZENO WS LOADER ONLINE - us-east'));
 app.get('/health', (req, res) => res.send('OK'));
+
+// NOUVEAU : /info pour l'onglet Info du AJ
+// Appelé par le AJ toutes les 10 sec pour mettre à jour le timer
+app.get('/info', async (req, res) => {
+  res.set('Content-Type', 'application/json');
+  try {
+    const token = (req.query.token || '').trim();
+    if (!token) return res.json({ ok: false, error: 'No token' });
+    const { data: tokenData, error } = await supabase.from('tokens').select('*').eq('token', token).maybeSingle();
+    if (error) return res.json({ ok: false, error: 'Supabase error' });
+    if (!tokenData) return res.json({ ok: false, error: 'Invalid token' });
+
+    const expiresMs = new Date(tokenData.expires_at).getTime();
+    const nowMs = Date.now();
+    const remainingMs = Math.max(0, expiresMs - nowMs);
+    const remainingSec = Math.floor(remainingMs / 1000);
+    const days = Math.floor(remainingSec / 86400);
+    const hours = Math.floor((remainingSec % 86400) / 3600);
+    const mins = Math.floor((remainingSec % 3600) / 60);
+    const secs = remainingSec % 60;
+
+    const { data: freezeData } = await supabase.from('freeze').select('*').eq('id', 1).maybeSingle();
+    const globalFrozen = !!(freezeData && freezeData.frozen);
+    const isFrozen = !!(tokenData.frozen || globalFrozen);
+    const isExpired = expiresMs < nowMs;
+
+    return res.json({
+      ok: true,
+      pseudo: tokenData.roblox_pseudo,
+      discord_id: tokenData.discord_id,
+      region: tokenData.region,
+      expires_at: tokenData.expires_at,
+      remaining_seconds: remainingSec,
+      remaining_text: days + 'j ' + hours + 'h ' + mins + 'm ' + secs + 's',
+      days: days, hours: hours, mins: mins, secs: secs,
+      frozen: isFrozen,
+      global_frozen: globalFrozen,
+      expired: isExpired,
+      status: isExpired ? 'Expiré' : (isFrozen ? 'Freezé' : 'Connecté')
+    });
+  } catch(e) {
+    console.log('[WS] /info crash:', e);
+    return res.json({ ok: false, error: 'WS error' });
+  }
+});
 
 app.get('/loader', async (req, res) => {
   res.set('Content-Type', 'text/plain');
