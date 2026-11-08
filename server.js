@@ -1,5 +1,5 @@
-// server.js - ZENO WS V24 - FIX GITHUB 404 - Bearer + API fallback
-// Le token fine-grained a besoin de Bearer, pas de "token"
+// server.js - ZENO WS V25 - HWID LOCK - 1 token = 1 pseudo + 1 seul appareil
+// 1ère utilisation = bloque l'appareil, 2ème appareil = kick Wrong device
 
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -26,42 +26,22 @@ let lastFetch = 0;
 
 async function getAJ() {
   if (cachedAJ && Date.now() - lastFetch < 60000) return cachedAJ;
-  // FIX : Bearer pour fine-grained, pas "token"
   const headers = { 'User-Agent': 'ZENO-WS', 'Accept': 'application/vnd.github.raw' };
   if (GITHUB_TOKEN) headers['Authorization'] = 'Bearer ' + GITHUB_TOKEN;
-  console.log('[WS] Try GitHub RAW:', GITHUB_AJ_URL);
-  console.log('[WS] Token présent ?', !!GITHUB_TOKEN, 'len', GITHUB_TOKEN.length, 'start', GITHUB_TOKEN ? GITHUB_TOKEN.slice(0,12) : 'AUCUN');
   let res = await fetch(GITHUB_AJ_URL, { headers });
-  console.log('[WS] RAW status:', res.status);
   if (res.ok) {
     const text = await res.text();
     if (text.length > 100 && !text.includes('404: Not Found') && !text.includes('<html')) {
-      cachedAJ = text; lastFetch = Date.now();
-      console.log('[WS] ✅ AJ via RAW, len', text.length);
-      return text;
+      cachedAJ = text; lastFetch = Date.now(); return text;
     }
-    console.log('[WS] RAW a renvoyé du HTML, on essaie API');
   }
-  // Fallback API GitHub - donne un meilleur message d'erreur
-  console.log('[WS] Try GitHub API:', GITHUB_API_URL);
   const apiHeaders = { 'User-Agent': 'ZENO-WS', 'Accept': 'application/vnd.github+json' };
   if (GITHUB_TOKEN) apiHeaders['Authorization'] = 'Bearer ' + GITHUB_TOKEN;
   const apiRes = await fetch(GITHUB_API_URL, { headers: apiHeaders });
-  console.log('[WS] API status:', apiRes.status);
-  if (!apiRes.ok) {
-    const err = new Error('GITHUB_' + apiRes.status);
-    err.status = apiRes.status;
-    // On lit le message de GitHub pour le log
-    try { const j = await apiRes.text(); console.log('[WS] API error body:', j.slice(0,500)); } catch(_) {}
-    throw err;
-  }
+  if (!apiRes.ok) { const err = new Error('GITHUB_' + apiRes.status); err.status = apiRes.status; throw err; }
   const apiJson = await apiRes.json();
-  if (!apiJson.content) throw new Error('GITHUB_API_NO_CONTENT');
   const text = Buffer.from(apiJson.content, 'base64').toString('utf-8');
-  if (text.length < 100) throw new Error('GITHUB_API_EMPTY');
-  cachedAJ = text; lastFetch = Date.now();
-  console.log('[WS] ✅ AJ via API, len', text.length);
-  return text;
+  cachedAJ = text; lastFetch = Date.now(); return text;
 }
 
 function kickLua(msg) {
@@ -69,17 +49,43 @@ function kickLua(msg) {
   return 'game:GetService("Players").LocalPlayer:Kick("' + safe + '")';
 }
 
-app.get('/', (req, res) => res.send('ZENO WS V24 - Bearer Fix - Token présent: ' + (!!GITHUB_TOKEN)));
+app.get('/', (req, res) => res.send('ZENO WS V25 HWID - Token présent: ' + (!!GITHUB_TOKEN)));
 app.get('/health', (req, res) => res.send('OK'));
 
 app.get('/test-github', async (req, res) => {
   res.set('Content-Type', 'application/json');
+  try { const aj = await getAJ(); return res.json({ ok: true, len: aj.length }); }
+  catch(e) { return res.json({ ok: false, error: e.message, status: e.status || null }); }
+});
+
+// NOUVEAU : /hwid - Vérifie et bloque l'appareil
+// Appelé par le AJ au lancement : /hwid?token=...&hwid=...
+// Si hwid est vide dans Supabase, on le bloque sur cet appareil (1ère fois)
+// Si hwid est déjà bloqué et différent, on kick Wrong device
+app.get('/hwid', async (req, res) => {
+  res.set('Content-Type', 'application/json');
   try {
-    const aj = await getAJ();
-    return res.json({ ok: true, len: aj.length, token_present: !!GITHUB_TOKEN, token_start: GITHUB_TOKEN ? GITHUB_TOKEN.slice(0,12) : null });
-  } catch(e) {
-    return res.json({ ok: false, error: e.message, status: e.status || null, token_present: !!GITHUB_TOKEN, token_start: GITHUB_TOKEN ? GITHUB_TOKEN.slice(0,12) : null, token_len: GITHUB_TOKEN.length, hint: e.status===404 ? 'Token a pas accès au repo aj.lua OU fichier pas sur main' : e.status===401 ? 'Token mort' : e.status===403 ? 'Token a pas Contents Read-only' : '' });
-  }
+    const token = (req.query.token || '').trim();
+    const hwid = (req.query.hwid || '').trim();
+    if (!token) return res.json({ ok: false, error: 'No token' });
+    if (!hwid || hwid === '' || hwid === 'unknown') return res.json({ ok: true, hwid_check: 'skip', reason: 'Executor a pas de HWID, on bloque que sur pseudo' });
+    const { data: tokenData, error } = await supabase.from('tokens').select('*').eq('token', token).maybeSingle();
+    if (error) return res.json({ ok: false, error: 'Supabase error' });
+    if (!tokenData) return res.json({ ok: false, error: 'Invalid token' });
+    // 1ère fois : pas de HWID bloqué, on le bloque
+    if (!tokenData.hwid || tokenData.hwid === '') {
+      await supabase.from('tokens').update({ hwid: hwid, hwid_locked: true }).eq('token', token);
+      console.log('[HWID] 🔒 Nouveau HWID bloqué pour', tokenData.roblox_pseudo, 'hwid', hwid.slice(0,12) + '...');
+      return res.json({ ok: true, hwid_check: 'locked', hwid: hwid });
+    }
+    // Déjà bloqué : on compare
+    if (tokenData.hwid === hwid) {
+      return res.json({ ok: true, hwid_check: 'ok' });
+    }
+    // Mauvais appareil
+    console.log('[HWID] ❌ Wrong device pour', tokenData.roblox_pseudo, 'attendu', tokenData.hwid.slice(0,12), 'reçu', hwid.slice(0,12));
+    return res.json({ ok: false, hwid_check: 'wrong_device', error: 'Wrong device' });
+  } catch(e) { return res.json({ ok: false, error: 'WS error' }); }
 });
 
 app.get('/info', async (req, res) => {
@@ -107,7 +113,8 @@ app.get('/info', async (req, res) => {
       expires_at: tokenData.expires_at, remaining_seconds: remainingSec,
       remaining_text: days + 'j ' + hours + 'h ' + mins + 'm ' + secs + 's',
       days, hours, mins, secs, frozen: isFrozen, global_frozen: globalFrozen, expired: isExpired,
-      status: isExpired ? 'Expiré' : (isFrozen ? 'Freezé' : 'Connecté')
+      status: isExpired ? 'Expiré' : (isFrozen ? 'Freezé' : 'Connecté'),
+      hwid_locked: !!tokenData.hwid_locked
     });
   } catch(e) { return res.json({ ok: false, error: 'WS error' }); }
 });
@@ -134,13 +141,13 @@ app.get('/loader', async (req, res) => {
     console.log('[WS] OK ' + tokenData.roblox_pseudo);
     let ajCode;
     try { ajCode = await getAJ(); } catch(e) {
-      console.log('[WS] getAJ error:', e.message);
       if (e.status === 404) return res.send(kickLua('ZENO | GitHub 404 - Token a pas accès au repo aj.lua'));
       if (e.status === 401) return res.send(kickLua('ZENO | GitHub 401 - Token mort'));
       if (e.status === 403) return res.send(kickLua('ZENO | GitHub 403 - Token a pas Contents Read'));
       return res.send(kickLua('ZENO | GitHub error ' + e.message));
     }
     const expectedPseudo = String(tokenData.roblox_pseudo).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    // PROTECTION : Pseudo + HWID
     const protectionCode =
       'local _ZENO_LOCAL = game:GetService("Players").LocalPlayer\n' +
       'if _ZENO_LOCAL and _ZENO_LOCAL.Name ~= "' + expectedPseudo + '" then\n' +
@@ -149,10 +156,26 @@ app.get('/loader', async (req, res) => {
       'end\n' +
       'getgenv().SESSION_TOKEN = "' + token + '"\n' +
       'getgenv().USERNAME = "' + expectedPseudo + '"\n' +
-      'getgenv().DISCORD_ID = "' + tokenData.discord_id + '"\n';
+      'getgenv().DISCORD_ID = "' + tokenData.discord_id + '"\n' +
+      '-- ZENO HWID CHECK - 1 token = 1 seul appareil\n' +
+      'pcall(function()\n' +
+      '  local _hwid = "unknown"\n' +
+      '  pcall(function() if gethwid then _hwid = tostring(gethwid()) end end)\n' +
+      '  pcall(function() if get_hwid then _hwid = tostring(get_hwid()) end end)\n' +
+      '  pcall(function() if syn and syn.get_hwid then _hwid = tostring(syn.get_hwid()) end end)\n' +
+      '  if _hwid ~= "unknown" and _hwid ~= "" then\n' +
+      '    local _res = game:HttpGet("https://zeno-ws-server-us-east.onrender.com/hwid?token=" .. getgenv().SESSION_TOKEN .. "&hwid=" .. _hwid)\n' +
+      '    local _ok = string.find(_res, \'"ok":true\') ~= nil\n' +
+      '    local _wrong = string.find(_res, "wrong_device") ~= nil\n' +
+      '    if _wrong then\n' +
+      '      game:GetService("Players").LocalPlayer:Kick("ZENO | Wrong device")\n' +
+      '      return\n' +
+      '    end\n' +
+      '    if not _ok then print("[ZENO HWID] Check skip") end\n' +
+      '  end\n' +
+      'end)\n';
     return res.send(protectionCode + ajCode);
   } catch(e) { return res.send(kickLua('ZENO | WS error')); }
 });
 
 app.listen(PORT, () => console.log('[ZENO WS] Sur port ' + PORT));
-                                                                         
